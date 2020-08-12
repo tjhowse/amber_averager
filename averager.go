@@ -44,23 +44,26 @@ func getStdDev(c client.Client, timeframe string) (float64, error) {
 	return getAggregatedMetric(c, "stddev", timeframe)
 }
 
-// func insertCalculatedValue(c client.Client) {
-// 	query := `
-// 	INSERT derived_5m_bid_sigma`
-// 	query = fmt.Sprintf(query, metric, timeframe)
-// 	q := client.NewQuery(query, "telegraf", "")
-// 	response, err := c.Query(q)
-// }
-
-func calcSigmaForTimepoint(c client.Client, timepoint string) (float64, error) {
+func convertTimeStringToTimeFilterString(timepoint string) string {
 	t, err := time.Parse(time.RFC3339, timepoint)
 	if err != nil {
-		fmt.Printf("Failed to parse time: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Failed to parse time: %v\n", err)
 	}
 	timeNS := t.UnixNano()
-	timeFilter := fmt.Sprintf("time < %v and time > %v - ", timeNS, timeNS)
-	// fmt.Println(timeFilter + "1w")
+	return fmt.Sprintf("time < %v and time > %v - ", timeNS, timeNS)
+}
+
+func calcSigmaForTimepoint(c client.Client, timepoint string) (float64, error) {
+	timeFilter := convertTimeStringToTimeFilterString(timepoint)
+	current, err := getAggregatedMetric(c, "mean", timeFilter+"9m")
+	if err != nil {
+		return 0, fmt.Errorf("Couldn't get a current value: %v", err)
+	}
+	return calcSigmaForTimepointWithCurrentValue(c, timepoint, current)
+}
+
+func calcSigmaForTimepointWithCurrentValue(c client.Client, timepoint string, current float64) (float64, error) {
+	timeFilter := convertTimeStringToTimeFilterString(timepoint)
 	stdDev, err := getAggregatedMetric(c, "stddev", timeFilter+"1w")
 	if err != nil {
 		return 0, fmt.Errorf("Couldn't get stdDev: %v", err)
@@ -69,17 +72,8 @@ func calcSigmaForTimepoint(c client.Client, timepoint string) (float64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("Couldn't get mean: %v", err)
 	}
-	current, err := getAggregatedMetric(c, "mean", timeFilter+"9m")
-	if err != nil {
-		return 0, fmt.Errorf("Couldn't get a current value: %v", err)
-	}
-	// fmt.Printf("%f %f %f\n", stdDev, mean, current)
 	return (current - mean) / stdDev, nil
 }
-
-// func calcSigmaForTimepointWithCurrentValue(c client.Client, timepoint string, current float64) (float64, error) {
-
-// }
 
 func getTimesForCalculations(c client.Client) ([]string, error) {
 	query := `
@@ -151,6 +145,13 @@ func main() {
 	c, err := a.SubscribeAndGetChannel("6hull/power_price/import/5m_bid")
 	if err != nil {
 		log.Fatal(err)
+	}
+	for {
+		msg := <-c
+		// Parse the value from the payload to a float64
+		// call calcSigmaForTimepointWithCurrentValue
+		// call mosquittoscope.Publish("6hull/power_price/import/5m_bid_sigma", value)
+
 	}
 
 }
