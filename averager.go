@@ -113,8 +113,9 @@ func getTimesForCalculations(c client.Client, startingTimeframe string) ([]strin
 
 func getMostRecent5mBidSigmaTimeNS(c client.Client) (string, error) {
 	query := `
-	SELECT "5m_bid_sigma"
-	FROM "calculated_values"
+	SELECT "value"
+	FROM "mqtt_consumer"
+	WHERE ("topic" = '6hull/power_price/import/5m_bid_sigma')
 	ORDER BY time DESC
 	LIMIT 1
 	`
@@ -146,14 +147,17 @@ func writeSigmaAtTimepoint(c client.Client, sigma float64, timepoint string) err
 		Precision: "ns",
 	})
 
-	fields := map[string]interface{}{"5m_bid_sigma": sigma}
+	fields := map[string]interface{}{"value": sigma}
 	t, err := time.Parse(time.RFC3339, timepoint)
 	t = t.Add(-time.Duration(5 * time.Minute))
 	if err != nil {
 		fmt.Printf("Failed to parse time: %v\n", err)
 		os.Exit(1)
 	}
-	p, _ := client.NewPoint("calculated_values", nil, fields, t)
+	tags := map[string]string{}
+	tags["topic"] = "6hull/power_price/import/5m_bid_sigma"
+	tags["providence"] = "calculated"
+	p, _ := client.NewPoint("mqtt_consumer", tags, fields, t)
 	bp.AddPoint(p)
 
 	return c.Write(bp)
@@ -181,14 +185,17 @@ func backfillHistorical5mBidSigma(c client.Client) {
 			// fmt.Printf("Shit! %v\n", err)
 			continue
 		}
-		fields := map[string]interface{}{"5m_bid_sigma": sigma}
+		fields := map[string]interface{}{"value": sigma}
 		t, err := time.Parse(time.RFC3339, v)
 		t = t.Add(-time.Duration(5 * time.Minute))
 		if err != nil {
 			fmt.Printf("Failed to parse time: %v\n", err)
 			os.Exit(1)
 		}
-		p, _ := client.NewPoint("calculated_values", nil, fields, t)
+		tags := map[string]string{}
+		tags["topic"] = "6hull/power_price/import/5m_bid_sigma"
+		tags["providence"] = "calculated"
+		p, _ := client.NewPoint("mqtt_consumer", tags, fields, t)
 		bp.AddPoint(p)
 	}
 	if err := c.Write(bp); err != nil {
@@ -204,6 +211,8 @@ func main() {
 		log.Fatalf("Cannot create influxdb HTTP API client: %s", err)
 	}
 	backfillHistorical5mBidSigma(c)
+	// fmt.Println(getMostRecent5mBidSigmaTimeNS(c))
+	// os.Exit(0)
 
 	s := mosquittoscope.NewSettings("./default.yaml")
 	a := mosquittoscope.NewMQTTMonitor(s)
