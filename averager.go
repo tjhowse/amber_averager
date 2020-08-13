@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"../mosquittoscope/mosquittoscope"
@@ -139,10 +140,31 @@ func getMostRecent5mBidSigmaTimeNS(c client.Client) (string, error) {
 	return convertTimeStringToTimeNSString(result)
 }
 
+func writeSigmaAtTimepoint(c client.Client, sigma float64, timepoint string) error {
+	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
+		Database:  "telegraf",
+		Precision: "ns",
+	})
+
+	fields := map[string]interface{}{"5m_bid_sigma": sigma}
+	t, err := time.Parse(time.RFC3339, timepoint)
+	t = t.Add(-time.Duration(5 * time.Minute))
+	if err != nil {
+		fmt.Printf("Failed to parse time: %v\n", err)
+		os.Exit(1)
+	}
+	p, _ := client.NewPoint("calculated_values", nil, fields, t)
+	bp.AddPoint(p)
+
+	return c.Write(bp)
+}
+
 func backfillHistorical5mBidSigma(c client.Client) {
 	timens, err := getMostRecent5mBidSigmaTimeNS(c)
 	if err != nil {
-		log.Fatalf("Unable to get the time of the most recent 5m_bid_sigma calculated_value: %s", err)
+		log.Printf("Unable to get the time of the most recent 5m_bid_sigma calculated_value: %s", err)
+		log.Printf("Using default 1593924758000*1e6")
+		timens = "1593924758000000000"
 	}
 	times, err := getTimesForCalculations(c, timens)
 	if err != nil {
@@ -183,19 +205,29 @@ func main() {
 	}
 	backfillHistorical5mBidSigma(c)
 
-	s := mosquittoscope.NewSettings("./defaults.yaml")
-
+	s := mosquittoscope.NewSettings("./default.yaml")
 	a := mosquittoscope.NewMQTTMonitor(s)
-	c, err := a.SubscribeAndGetChannel("6hull/power_price/import/5m_bid")
+	topicChannel, err := a.SubscribeAndGetChannel("6hull/power_price/import/5m_bid")
 	if err != nil {
 		log.Fatal(err)
 	}
 	for {
-		msg := <-c
-		// Parse the value from the payload to a float64
-		// call calcSigmaForTimepointWithCurrentValue
-		// call mosquittoscope.Publish("6hull/power_price/import/5m_bid_sigma", value)
-
+		msg := <-topicChannel
+		v, err := strconv.ParseFloat(string(msg.Payload()), 64)
+		if err != nil {
+			log.Printf("Failed to parse payload: %q\n", msg)
+			continue
+		}
+		now := time.Now().Format(time.RFC3339)
+		sigma, err := calcSigmaForTimepointWithCurrentValue(c, now, v)
+		if err != nil {
+			log.Printf("Failed to calculate sigma: %q\n", err)
+			continue
+		}
+		if err := a.Publish("6hull/power_price/import/5m_bid_sigma", fmt.Sprintf("%v", sigma)); err != nil {
+			log.Printf("Failed to publish sigma: %q\n", msg)
+			continue
+		}
+		log.Printf("Calculated sigma %v", sigma)
 	}
-
 }
