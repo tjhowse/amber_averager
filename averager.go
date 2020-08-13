@@ -44,12 +44,18 @@ func getStdDev(c client.Client, timeframe string) (float64, error) {
 	return getAggregatedMetric(c, "stddev", timeframe)
 }
 
-func convertTimeStringToTimeFilterString(timepoint string) string {
+func convertTimeStringToTimeNSString(timepoint string) (string, error) {
 	t, err := time.Parse(time.RFC3339, timepoint)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%v", t.UnixNano()), nil
+}
+func convertTimeStringToTimeFilterString(timepoint string) string {
+	timeNS, err := convertTimeStringToTimeNSString(timepoint)
 	if err != nil {
 		log.Fatalf("Failed to parse time: %v\n", err)
 	}
-	timeNS := t.UnixNano()
 	return fmt.Sprintf("time < %v and time > %v - ", timeNS, timeNS)
 }
 
@@ -75,14 +81,16 @@ func calcSigmaForTimepointWithCurrentValue(c client.Client, timepoint string, cu
 	return (current - mean) / stdDev, nil
 }
 
-func getTimesForCalculations(c client.Client) ([]string, error) {
+func getTimesForCalculations(c client.Client, startingTimeframe string) ([]string, error) {
 	query := `
 	SELECT "value"
 	FROM "mqtt_consumer"
-	WHERE ("topic" = '6hull/power_price/import/5m_bid') and time > 1593406358906 + 2w
+	WHERE ("topic" = '6hull/power_price/import/5m_bid') and time > %s
 	`
-	// WHERE ("topic" = '6hull/power_price/import/5m_bid') and time > now() - 1h
+	// 1593406358906 is about the time I started logging info from the amber API.
+
 	result := []string{}
+	query = fmt.Sprintf(query, startingTimeframe)
 	q := client.NewQuery(query, "telegraf", "")
 	response, err := c.Query(q)
 	if err == nil && response.Error() == nil {
@@ -100,14 +108,43 @@ func getTimesForCalculations(c client.Client) ([]string, error) {
 		}
 	}
 	return result, nil
-
 }
 
-func backfillHistorical5mBidSigma() {
-	c, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr: "http://localhost:8086",
-	})
-	times, err := getTimesForCalculations(c)
+func getMostRecent5mBidSigmaTimeNS(c client.Client) (string, error) {
+	query := `
+	SELECT "5m_bid_sigma"
+	FROM "calculated_values"
+	ORDER BY time DESC
+	LIMIT 1
+	`
+	// WHERE ("topic" = '6hull/power_price/import/5m_bid') and time > now() - 1h
+	result := ""
+	q := client.NewQuery(query, "telegraf", "")
+	response, err := c.Query(q)
+	if err == nil && response.Error() == nil {
+		if len(response.Results) == 0 {
+			return "", fmt.Errorf("No results to query")
+		}
+		if len(response.Results[0].Series) == 0 {
+			return "", fmt.Errorf("No series in results")
+		}
+		if len(response.Results[0].Series[0].Values) == 0 {
+			return "", fmt.Errorf("No values in series")
+		}
+		for _, v := range response.Results[0].Series[0].Values {
+			result = v[0].(string)
+		}
+	}
+
+	return convertTimeStringToTimeNSString(result)
+}
+
+func backfillHistorical5mBidSigma(c client.Client) {
+	timens, err := getMostRecent5mBidSigmaTimeNS(c)
+	if err != nil {
+		log.Fatalf("Unable to get the time of the most recent 5m_bid_sigma calculated_value: %s", err)
+	}
+	times, err := getTimesForCalculations(c, timens)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -135,10 +172,17 @@ func backfillHistorical5mBidSigma() {
 	if err := c.Write(bp); err != nil {
 		log.Fatal(err)
 	}
-
 }
 
 func main() {
+	c, err := client.NewHTTPClient(client.HTTPConfig{
+		Addr: "http://localhost:8086",
+	})
+	if err != nil {
+		log.Fatalf("Cannot create influxdb HTTP API client: %s", err)
+	}
+	backfillHistorical5mBidSigma(c)
+
 	s := mosquittoscope.NewSettings("./defaults.yaml")
 
 	a := mosquittoscope.NewMQTTMonitor(s)
