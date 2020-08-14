@@ -151,7 +151,7 @@ func writeSigmaAtTimepoint(c client.Client, sigma float64, timepoint string) err
 	t, err := time.Parse(time.RFC3339, timepoint)
 	t = t.Add(-time.Duration(5 * time.Minute))
 	if err != nil {
-		fmt.Printf("Failed to parse time: %v\n", err)
+		log.Printf("Failed to parse time: %v\n", err)
 		os.Exit(1)
 	}
 	tags := map[string]string{}
@@ -170,9 +170,18 @@ func backfillHistorical5mBidSigma(c client.Client) {
 		log.Printf("Using default 1593924758000*1e6")
 		timens = "1593924758000000000"
 	}
+	log.Printf("Last calculated value found at time %q\n", timens)
+	if nsInt, err := strconv.ParseInt(timens, 10, 64); err != nil {
+		log.Printf("Failed to parse %q as an int. Skipping window check.", timens)
+	} else {
+		if time.Now().Sub(time.Unix(0, nsInt)).Minutes() < 5 {
+			log.Print("Most recent sigma value published inside five minutes. Skipping backfill.")
+			return
+		}
+	}
 	times, err := getTimesForCalculations(c, timens)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("Couldn't get times for calculations: %v", err)
 	}
 	bp, _ := client.NewBatchPoints(client.BatchPointsConfig{
 		Database:  "telegraf",
@@ -182,14 +191,14 @@ func backfillHistorical5mBidSigma(c client.Client) {
 	for _, v := range times {
 		sigma, err := calcSigmaForTimepoint(c, v)
 		if err != nil {
-			// fmt.Printf("Shit! %v\n", err)
+			// log.Printf("Shit! %v\n", err)
 			continue
 		}
 		fields := map[string]interface{}{"value": sigma}
 		t, err := time.Parse(time.RFC3339, v)
 		t = t.Add(-time.Duration(5 * time.Minute))
 		if err != nil {
-			fmt.Printf("Failed to parse time: %v\n", err)
+			log.Printf("Failed to parse time: %v\n", err)
 			os.Exit(1)
 		}
 		tags := map[string]string{}
@@ -217,26 +226,36 @@ func main() {
 	s := mosquittoscope.NewSettings("./default.yaml")
 	a := mosquittoscope.NewMQTTMonitor(s)
 	topicChannel, err := a.SubscribeAndGetChannel("6hull/power_price/import/5m_bid")
+
 	if err != nil {
 		log.Fatal(err)
 	}
+	timeout := true
 	for {
-		msg := <-topicChannel
-		v, err := strconv.ParseFloat(string(msg.Payload()), 64)
-		if err != nil {
-			log.Printf("Failed to parse payload: %q\n", msg)
-			continue
+		select {
+		case msg := <-topicChannel:
+			v, err := strconv.ParseFloat(string(msg.Payload()), 64)
+			if err != nil {
+				log.Printf("Failed to parse payload: %q\n", msg)
+				continue
+			}
+			now := time.Now().Format(time.RFC3339)
+			sigma, err := calcSigmaForTimepointWithCurrentValue(c, now, v)
+			if err != nil {
+				log.Printf("Failed to calculate sigma: %q\n", err)
+				continue
+			}
+			if err := a.Publish("6hull/power_price/import/5m_bid_sigma", fmt.Sprintf("%v", sigma)); err != nil {
+				log.Printf("Failed to publish sigma: %q\n", msg)
+				continue
+			}
+			timeout = false
+			log.Printf("Calculated sigma %v", sigma)
+		case <-time.After(6 * time.Minute):
+			if !timeout {
+				log.Print("It's been more than six minutes without a publication.")
+			}
+			timeout = true
 		}
-		now := time.Now().Format(time.RFC3339)
-		sigma, err := calcSigmaForTimepointWithCurrentValue(c, now, v)
-		if err != nil {
-			log.Printf("Failed to calculate sigma: %q\n", err)
-			continue
-		}
-		if err := a.Publish("6hull/power_price/import/5m_bid_sigma", fmt.Sprintf("%v", sigma)); err != nil {
-			log.Printf("Failed to publish sigma: %q\n", msg)
-			continue
-		}
-		log.Printf("Calculated sigma %v", sigma)
 	}
 }
